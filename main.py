@@ -3,10 +3,10 @@ import re
 import time
 from datetime import date
 from pathlib import Path
-import textwrap
 from PIL import ImageDraw, ImageFont
 from PIL.Image import new as ImageNew
 from astrbot.api.all import *
+from astrbot.core import logger, LogManager, LogBroker
 # 导入签文数据
 from data.plugins.astrbot_plugin_sensoji_pro.sensoji_data import sensoji_results
 
@@ -53,128 +53,275 @@ class SensojiPlugin(Star):
         self.max_change_times = self.config.get("max_change_fortune_times", 3) if self.enable_change else 0
 
     async def generate_fortune_image(self, data: dict) -> str:
-        """使用 Pillow 生成带样式的运势图片"""
+        """优化版签文生成（智能分段+混合布局）"""
         # 配置参数
-        img_width = 1200  # 增加宽度以容纳阴影
-        padding = 50
-        line_spacing = 1.6  # 增加行间距
+        img_width = 800
+        padding = 60
         colors = {
-            "background": ["#FF9A8B", "#FF6A88", "#FF99AC"],  # 渐变背景
-            "title": (211, 47, 47),  # #d32f2f
-            "content_bg": (255, 255, 255, 128),  # 半透明白色
-            "text": (51, 51, 51),  # #333
-            "footer_bg": (255, 255, 255, 178),  # rgba(255,255,255,0.7)
-            "footer_text": (102, 102, 102),  # #666
-            "shadow": (0, 0, 0, 25)  # 阴影颜色
+            "background": "#FFF5E6",
+            "title": (188, 42, 26),
+            "text": (51, 51, 51),
+            "border": (205, 128, 83),
+            "stamp": (227, 66, 52)
         }
 
-        # 加载字体（需要实际字体文件支持）
+        # 加载字体
         font_dir = Path(__file__).parent / "fonts"
-        title_font = ImageFont.truetype(str(font_dir / "SimHei.ttf"), 48)  # 加大标题字号
-        content_font = ImageFont.truetype(str(font_dir / "SimHei.ttf"), 28)
-        footer_font = ImageFont.truetype(str(font_dir / "SimHei.ttf"), 24)
+        title_font = ImageFont.truetype(str(font_dir / "FZSTK.ttf"), 84)
+        content1_font = ImageFont.truetype(str(font_dir / "SSQFT.ttf"), 42)
+        content_font = ImageFont.truetype(str(font_dir / "BGTXT.ttf"), 38)
+        stamp_font = ImageFont.truetype(str(font_dir / "STLITI.ttf"), 46)
 
-        # 预处理文本内容
-        def process_text(text: str) -> list:
-            """带段落分隔的文本处理"""
-            return [para.strip() for para in text.replace('\n\n', '<br>').split('<br>')]
+        def smart_segment(text: str) -> list:
+            """智能分段逻辑优化"""
+            markers = ["解析：", "建议：", "运势细节："]
+            segments = []
+            buffer = ""
+            for line in text.split('\n'):
+                line = line.strip()
+                if any(line.startswith(m) for m in markers):
+                    if buffer:
+                        segments.append(buffer)
+                        buffer = ""
+                    segments.append("◆" + line)
+                else:
+                    buffer += line + " "
+            if buffer:
+                segments.append(buffer)
+            return segments
 
-        # 计算区块尺寸
-        def text_metrics(text: str, font: ImageFont) -> tuple:
-            bbox = font.getbbox(text)
-            return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+        def calculate_layout(segments: list) -> tuple:
+            """混合布局计算（竖排+横排）"""
+            layout_data = []
+            total_height = padding + 120
+            right_margin = 80
+            left_margin = 80
+            first_vertical = True
 
-        # 创建渐变背景
-        img = ImageNew("RGB", (img_width, 2000), "#FFFFFF")  # 临时高度
-        draw = ImageDraw.Draw(img, 'RGBA')
+            for seg in segments:
+                if not seg.strip():
+                    continue
 
-        # 绘制渐变背景
-        for i in range(img_width):
-            ratio = i / img_width
-            r = int(255 * (1 - ratio) + 255 * ratio)
-            g = int(154 * (1 - ratio) + 106 * ratio)
-            b = int(139 * (1 - ratio) + 136 * ratio)
-            draw.line([(i, 0), (i, 2000)], fill=(r, g, b))
+                seg = seg.replace('\u200b', '').replace('\ufeff', '')
 
-        # 绘制标题
-        title = "浅草寺抽签"
-        title_width, title_height = text_metrics(title, title_font)
-        title_x = (img_width - title_width) // 2
-        # 标题阴影
-        draw.text((title_x + 3, padding + 3), title, font=title_font, fill=colors["shadow"])
-        draw.text((title_x, padding), title, font=title_font, fill=colors["title"])
+                is_horizontal = any(seg.startswith(f"◆{m}") for m in ["解析：", "建议：", "运势细节："])
 
-        y_pos = padding + title_height + 40
+                if is_horizontal:
+                    # seg = seg.lstrip("◆")
+                    available_width = img_width - right_margin - left_margin
 
-        # 绘制内容卡片
-        card_padding = 30
-        content_width = img_width - 2 * card_padding
-        content_text = process_text(data.get("message", ""))
+                    lines = []
+                    current_line = []
+                    current_width = 0
+                    for char in seg:
+                        bbox = content_font.getbbox(char)
+                        char_width = bbox[2] - bbox[0]
+                        if current_width + char_width > available_width:
+                            lines.append("".join(current_line))
+                            current_line = [char]
+                            current_width = char_width
+                        else:
+                            current_line.append(char)
+                            current_width += char_width
+                    if current_line:
+                        lines.append("".join(current_line))
 
-        # 计算内容高度
-        content_height = 0
-        for para in content_text:
-            w, h = text_metrics(para, content_font)
-            lines = textwrap.wrap(para, width=36)  # 每行18个汉字
-            content_height += (len(lines) * h * line_spacing) + 20  # 段落间距
+                    line_height = 45
+                    seg_height = len(lines) * line_height + 50
 
-        # 绘制卡片背景
-        draw.rounded_rectangle(
-            (card_padding, y_pos, img_width - card_padding, y_pos + content_height + 60),
-            radius=15,
-            fill=colors["content_bg"]
+                    layout_data.append({
+                        "type": "horizontal",
+                        "content": lines,
+                        "height": seg_height,
+                        "line_height": line_height
+                    })
+                    total_height += seg_height
+                else:
+                    if first_vertical and "　" in seg and " 诗文：" in seg and "；" in seg:
+                        first_vertical = False
+                        parts = seg.split(" 诗文：", 1)
+                        fortune_info = parts[0]
+                        poem_parts = parts[1].split("；", 1)
+                        if len(poem_parts) == 2:
+                            line1 = poem_parts[0]
+                            line2 = poem_parts[1]
+
+                            col1 = [char for char in fortune_info]
+                            col2 = [char for char in "诗文："]
+                            col3 = [char for char in line1]
+                            col4 = [char for char in line2]
+
+                            max_len = max(len(col1), len(col2), len(col3), len(col4))
+                            seg_height = max_len * 45 + 40  # Using line_height and section_spacing
+
+                            layout_data.append({
+                                "type": "vertical_four_col",
+                                "columns": [col1, col2, col3, col4],
+                                "height": seg_height,
+                                "col_width": 60,  # Adjust as needed
+                                "line_height": 45
+                            })
+                            total_height += seg_height
+                            continue  # Skip the old vertical logic
+                    else:
+                        # 默认采用横排格式
+                        available_width = img_width - right_margin - left_margin
+
+                        lines = []
+                        current_line = []
+                        current_width = 0
+                        for char in seg:
+                            bbox = content_font.getbbox(char)
+                            char_width = bbox[2] - bbox[0]
+                            if current_width + char_width > available_width:
+                                lines.append("".join(current_line))
+                                current_line = [char]
+                                current_width = char_width
+                            else:
+                                current_line.append(char)
+                                current_width += char_width
+                        if current_line:
+                            lines.append("".join(current_line))
+
+                        line_height = 45
+                        seg_height = len(lines) * line_height + 50
+
+                        layout_data.append({
+                            "type": "horizontal",
+                            "content": lines,
+                            "height": seg_height,
+                            "line_height": line_height
+                        })
+                        total_height += seg_height
+
+            return layout_data, total_height + 300, right_margin
+
+        # 创建画布
+        segments = smart_segment(data.get("message"))
+        layout_data, total_height, right_margin = calculate_layout(segments)
+
+        img = ImageNew("RGB", (img_width, total_height), colors["background"])
+        draw = ImageDraw.Draw(img)
+
+        # 绘制背景纹理
+        for i in range(0, img_width, 6):
+            draw.line([(i, 0), (i, total_height)], fill=(230, 220, 210), width=1)
+
+        # 绘制边框
+        border_width = 10
+        draw.rectangle(
+            [border_width, border_width, img_width - border_width, total_height - border_width],
+            outline=colors["border"],
+            width=2
         )
 
-        # 绘制正文内容
-        y_pos += 40
-        for para in content_text:
-            lines = textwrap.wrap(para, width=36)
-            for line in lines:
-                line_width, line_height = text_metrics(line, content_font)
-                draw.text(
-                    (card_padding + 40, y_pos),
-                    line,
-                    font=content_font,
-                    fill=colors["text"]
-                )
-                y_pos += line_height * line_spacing
-            y_pos += 20  # 段落后间距
+        # 绘制标题
+        title = data.get("title")
+        title_bbox = draw.textbbox((0, 0), title, font=title_font)
+        title_x = (img_width - title_bbox[2]) // 2
+        draw.text((title_x, padding + 20), title, fill=colors["title"], font=title_font)
 
-        # 绘制页脚
-        if data.get("footer"):
-            footer = data["footer"]
-            footer_width, footer_height = text_metrics(footer, footer_font)
+        # 混合排版逻辑
+        y_pos = padding + title_bbox[3] + 140
+        left_margin = 80
 
-            # 计算页脚总宽度（包含内边距）
-            footer_total_width = footer_width + 40  # 左右各20像素内边距
-            footer_start_x = (img_width - footer_total_width) // 2  # 居中计算
+        for seg_data in layout_data:
+            if seg_data["type"] == "horizontal":
+                y_pos += 30
+                for line in seg_data["content"]:
+                    draw.text((left_margin, y_pos), line, fill=colors["text"], font=content_font)
+                    y_pos += seg_data["line_height"]
+                y_pos += 50
+            elif seg_data["type"] == "vertical_four_col":
+                columns = seg_data["columns"]
+                col_width = seg_data["col_width"]
+                line_height = seg_data["line_height"]
+                spacing = 140  # 增加四列竖排的列间距
+                start_x = left_margin
+                max_y = y_pos
 
-            # 绘制背景
-            draw.rounded_rectangle(
-                (footer_start_x, y_pos + 50,
-                 footer_start_x + footer_total_width, y_pos + footer_height + 70),
-                radius=8,
-                fill=colors["footer_bg"]
-            )
+                for col_idx, column in enumerate(columns):
+                    current_y = y_pos
+                    for char in column:
+                        draw.text(
+                            (start_x + col_idx * col_width + col_idx * spacing, current_y),
+                            char,
+                            fill=colors["text"],
+                            font=content1_font
+                        )
+                        current_y += line_height
+                    max_y = max(max_y, current_y)
+                y_pos = max_y
+            elif seg_data["type"] == "vertical":
+                columns = seg_data["columns"]
+                col_width = seg_data["col_width"]
+                line_height = seg_data["line_height"]
+                spacing = 40  # 增加普通竖排的列间距
+                start_x = left_margin
+                max_y = y_pos
+                for col_idx, column in enumerate(columns):
+                    current_y = y_pos
+                    for char in column:
+                        draw.text(
+                            (start_x + col_idx * (col_width + spacing), current_y),
+                            char,
+                            fill=colors["text"],
+                            font=content_font
+                        )
+                        current_y += line_height
+                    max_y = max(max_y, current_y)
+                y_pos = max_y
 
-            # 绘制文字（在背景内居中）
-            text_x = footer_start_x + 20  # 左侧内边距
-            text_y = y_pos + 60  # 垂直居中
-            draw.text(
-                (text_x, text_y),
-                footer,
-                font=footer_font,
-                fill=colors["footer_text"]
-            )
+        # 印章绘制优化 - 调整位置以重合
+        stamp_text = "浅草寺"
+        stamp_bbox = draw.textbbox((0, 0), stamp_text, font=stamp_font)
+        stamp_size = max(stamp_bbox[2] - stamp_bbox[0], 50)
 
-        # 裁剪图片到合适高度
-        img = img.crop((0, 0, img_width, y_pos + 120))
+        # 计算印章可以出现的右下角区域
+        right_margin_buffer = 20  # 留出一些右边距
+        bottom_margin_buffer = 20  # 留出一些底部边距
+
+        min_stamp_x = int(img_width * 0.6)
+        max_stamp_x = img_width - stamp_size - right_margin_buffer
+
+        min_stamp_y = int(total_height * 0.8)
+        max_stamp_y = total_height - stamp_size - bottom_margin_buffer
+
+        # 确保 min_stamp_x 不大于 max_stamp_x
+        if min_stamp_x > max_stamp_x:
+            min_stamp_x = max_stamp_x  # 或者你可以根据需要设置一个默认值
+
+        # 确保 min_stamp_y 不大于 max_stamp_y
+        if min_stamp_y > max_stamp_y:
+            min_stamp_y = max_stamp_y  # 或者你可以根据需要设置一个默认值
+
+        # 生成随机的 x 和 y 坐标
+        stamp_x = random.randint(min_stamp_x, max_stamp_x)
+        stamp_y = random.randint(min_stamp_y, max_stamp_y)
+
+        draw.ellipse(
+            [stamp_x, stamp_y, stamp_x + stamp_size, stamp_y + stamp_size],
+            outline=colors["stamp"],
+            width=2
+        )
+        # 调整文字位置，使其居中于随机生成的圆内
+        text_x = stamp_x + (stamp_size - stamp_bbox[2]) // 2
+        text_y = stamp_y + (stamp_size - stamp_bbox[3]) // 2 - (stamp_bbox[1])  # 稍微调整文字的垂直位置
+        draw.text(
+            (text_x, text_y),
+            stamp_text,
+            fill=colors["stamp"],
+            font=stamp_font
+        )
+
+        # 最终裁剪
+        img = img.crop((0, 0, img_width, total_height))
 
         # 保存文件
         output_dir = Path(__file__).parent / "output"
-        output_dir.mkdir(exist_ok=True, parents=True)
-        output_path = output_dir / f"{int(time.time())}.png"
-        img.save(output_path, quality=95)
+        output_dir.mkdir(exist_ok=True)
+        output_path = output_dir / f"sign_{int(time.time())}.png"
+        img.save(output_path, quality=95, optimize=True)
 
         return str(output_path.resolve())
 
@@ -225,7 +372,6 @@ class SensojiPlugin(Star):
         if user_id not in user_daily_results or is_change_fortune:
             selected_result = random.choice(result_data)
             result_message = self.get_fortune_message(selected_result)
-
             user_daily_results[user_id] = {
                 'date': today,
                 'result': result_message
@@ -275,7 +421,7 @@ class SensojiPlugin(Star):
         # })
         image_url = await self.generate_fortune_image({
             "title": "解签结果",
-            "message": self.remove_escaped_emojis(llm_response.completion_text).replace("\n", "<br>")
+            "message": self.remove_escaped_emojis(llm_response.completion_text)
         })
         # url = await self.html_render(TMPL, {"title": "解签结果", "message": self.remove_escaped_emojis(llm_response.completion_text.replace("\n", "<br>"))})
         try:
@@ -389,7 +535,7 @@ class SensojiPlugin(Star):
         # })
         image_url = await self.generate_fortune_image({
             "title": "转运结果",
-            "message": result.replace("\n", "<br>"),
+            "message": result,
             "footer": f"今日已转运 {change_counts[user_id]['count']}/{self.max_change_times if self.max_change_times > 0 else '∞'} 次"
         })
         try:
