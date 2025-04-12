@@ -68,8 +68,9 @@ class SensojiPlugin(Star):
         # 加载字体
         font_dir = Path(__file__).parent / "fonts"
         title_font = ImageFont.truetype(str(font_dir / "FZSTK.ttf"), 84)
-        content1_font = ImageFont.truetype(str(font_dir / "SSQFT.ttf"), 42)
-        content_font = ImageFont.truetype(str(font_dir / "BGTXT.ttf"), 38)
+        sx_content_font = ImageFont.truetype(str(font_dir / "SSQFT.ttf"), 66)
+        s_content_font = ImageFont.truetype(str(font_dir / "SSQFT.ttf"), 42)
+        h_content_font = ImageFont.truetype(str(font_dir / "BGTXT.ttf"), 38)
         stamp_font = ImageFont.truetype(str(font_dir / "STLITI.ttf"), 46)
 
         def smart_segment(text: str) -> list:
@@ -114,7 +115,7 @@ class SensojiPlugin(Star):
                     current_line = []
                     current_width = 0
                     for char in seg:
-                        bbox = content_font.getbbox(char)
+                        bbox = h_content_font.getbbox(char)
                         char_width = bbox[2] - bbox[0]
                         if current_width + char_width > available_width:
                             lines.append("".join(current_line))
@@ -155,8 +156,8 @@ class SensojiPlugin(Star):
                             seg_height = max_len * 45 + 40  # Using line_height and section_spacing
 
                             layout_data.append({
-                                "type": "vertical_four_col",
-                                "columns": [col1, col2, col3, col4],
+                                "type": "vertical",
+                                "columns": [col1, col3, col4],
                                 "height": seg_height,
                                 "col_width": 60,  # Adjust as needed
                                 "line_height": 45
@@ -171,7 +172,7 @@ class SensojiPlugin(Star):
                         current_line = []
                         current_width = 0
                         for char in seg:
-                            bbox = content_font.getbbox(char)
+                            bbox = h_content_font.getbbox(char)
                             char_width = bbox[2] - bbox[0]
                             if current_width + char_width > available_width:
                                 lines.append("".join(current_line))
@@ -229,46 +230,37 @@ class SensojiPlugin(Star):
             if seg_data["type"] == "horizontal":
                 y_pos += 30
                 for line in seg_data["content"]:
-                    draw.text((left_margin, y_pos), line, fill=colors["text"], font=content_font)
+                    draw.text((left_margin, y_pos), line, fill=colors["text"], font=h_content_font)
                     y_pos += seg_data["line_height"]
                 y_pos += 50
-            elif seg_data["type"] == "vertical_four_col":
-                columns = seg_data["columns"]
-                col_width = seg_data["col_width"]
-                line_height = seg_data["line_height"]
-                spacing = 140  # 增加四列竖排的列间距
-                start_x = left_margin
-                max_y = y_pos
-
-                for col_idx, column in enumerate(columns):
-                    current_y = y_pos
-                    for char in column:
-                        draw.text(
-                            (start_x + col_idx * col_width + col_idx * spacing, current_y),
-                            char,
-                            fill=colors["text"],
-                            font=content1_font
-                        )
-                        current_y += line_height
-                    max_y = max(max_y, current_y)
-                y_pos = max_y
             elif seg_data["type"] == "vertical":
                 columns = seg_data["columns"]
                 col_width = seg_data["col_width"]
                 line_height = seg_data["line_height"]
-                spacing = 40  # 增加普通竖排的列间距
-                start_x = left_margin
+                spacing = 150  # 增加竖排的列间距
+                start_x = left_margin + 80
                 max_y = y_pos
+
                 for col_idx, column in enumerate(columns):
                     current_y = y_pos
-                    for char in column:
-                        draw.text(
-                            (start_x + col_idx * (col_width + spacing), current_y),
-                            char,
-                            fill=colors["text"],
-                            font=content_font
-                        )
-                        current_y += line_height
+                    if col_idx == 0:
+                        for char in column:
+                            draw.text(
+                                (start_x + col_idx * col_width + col_idx * spacing, current_y),
+                                char,
+                                fill=colors["text"],
+                                font=sx_content_font
+                            )
+                            current_y += line_height * 1.6
+                    else:
+                        for char in column:
+                            draw.text(
+                                (start_x + col_idx * col_width + col_idx * spacing, current_y),
+                                char,
+                                fill=colors["text"],
+                                font=s_content_font
+                            )
+                            current_y += line_height
                     max_y = max(max_y, current_y)
                 y_pos = max_y
 
