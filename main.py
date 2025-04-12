@@ -8,7 +8,7 @@ from PIL import ImageDraw, ImageFont
 from PIL.Image import new as ImageNew
 from astrbot.api.all import *
 # 导入签文数据
-from data.plugins.astrbot_plugin_sensoji.sensoji_data import sensoji_results
+from data.plugins.astrbot_plugin_sensoji_pro.sensoji_data import sensoji_results
 
 # 定义 JSON 文件路径（存储在插件目录下）
 DATA_FILE = Path(__file__).parent / "user_daily_results.json"
