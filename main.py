@@ -69,7 +69,7 @@ class SensojiPlugin(Star):
         font_dir = Path(__file__).parent / "fonts"
         title_font = ImageFont.truetype(str(font_dir / "FZSTK.ttf"), 84)
         sx_content_font = ImageFont.truetype(str(font_dir / "SSQFT.ttf"), 66)
-        s_content_font = ImageFont.truetype(str(font_dir / "SSQFT.ttf"), 42)
+        s_content_font = ImageFont.truetype(str(font_dir / "SYST.otf"), 42)
         h_content_font = ImageFont.truetype(str(font_dir / "BGTXT.ttf"), 38)
         stamp_font = ImageFont.truetype(str(font_dir / "STLITI.ttf"), 46)
 
@@ -144,7 +144,7 @@ class SensojiPlugin(Star):
                         fortune_info = parts[0]
                         poem_parts = parts[1].split("；", 1)
                         if len(poem_parts) == 2:
-                            line1 = poem_parts[0]
+                            line1 = poem_parts[0] + '；'
                             line2 = poem_parts[1]
 
                             col1 = [char for char in fortune_info]
