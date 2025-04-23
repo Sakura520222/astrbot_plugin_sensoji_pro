@@ -56,12 +56,15 @@ class SensojiPlugin(Star):
         create_task(self.daily_cleanup_task())
 
     async def daily_cleanup_task(self):
+        if self.daily_cleanup <= 0:
+            logger.info(f"每日清理功能已关闭（daily_cleanup={self.daily_cleanup}）")
+            return
+
         while True:
             now = datetime.now()
             next_run = (now + timedelta(days=self.daily_cleanup)).replace(hour=0, minute=0, second=0, microsecond=0)
             sleep_seconds = (next_run - now).total_seconds()
 
-            # 将秒转换为“X小时Y分钟Z秒”格式
             hours = int(sleep_seconds // 3600)
             minutes = int((sleep_seconds % 3600) // 60)
             seconds = int(sleep_seconds % 60)
