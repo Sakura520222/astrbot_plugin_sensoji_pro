@@ -6,7 +6,8 @@ from pathlib import Path
 from PIL import ImageDraw, ImageFont
 from PIL.Image import new as ImageNew
 from astrbot.api.all import *
-from astrbot.core import logger, LogManager, LogBroker
+from asyncio import create_task, sleep
+from datetime import datetime, timedelta
 # 导入签文数据
 from data.plugins.astrbot_plugin_sensoji_pro.sensoji_data import sensoji_results
 
@@ -43,7 +44,7 @@ def save_change_counts(data):
     with open(CHANGE_COUNT_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-@register("astrbot_plugin_sensoji_pro", "xiamuceer-j", "浅草寺抽签插件-PRO", "1.1.0", "https://github.com/xiamuceer-j/astrbot_plugin_sensoji_pro")
+@register("astrbot_plugin_sensoji_pro", "xiamuceer-j", "浅草寺抽签插件-PRO", "1.2.0", "https://github.com/xiamuceer-j/astrbot_plugin_sensoji_pro")
 class SensojiPlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -51,6 +52,31 @@ class SensojiPlugin(Star):
         self.config = config
         self.enable_change = self.config.get("enable_change_fortune", True)
         self.max_change_times = self.config.get("max_change_fortune_times", 3) if self.enable_change else 0
+        self.daily_cleanup = self.config.get("daily_cleanup", 1)
+        create_task(self.daily_cleanup_task())
+
+    async def daily_cleanup_task(self):
+        while True:
+            now = datetime.now()
+            next_run = (now + timedelta(days=self.daily_cleanup)).replace(hour=0, minute=0, second=0, microsecond=0)
+            sleep_seconds = (next_run - now).total_seconds()
+
+            # 将秒转换为“X小时Y分钟Z秒”格式
+            hours = int(sleep_seconds // 3600)
+            minutes = int((sleep_seconds % 3600) // 60)
+            seconds = int(sleep_seconds % 60)
+            logger.info(f"[{now}] 距下次清理还有 {hours} 小时 {minutes} 分钟 {seconds} 秒...")
+
+            await sleep(sleep_seconds)
+
+            output_dir = Path(__file__).parent / "output"
+            if output_dir.exists():
+                for file in output_dir.glob("*.png"):
+                    try:
+                        file.unlink()
+                        logger.info(f"已删除文件：{file}")
+                    except Exception as e:
+                        logger.warning(f"无法删除文件 {file}: {e}")
 
     async def generate_fortune_image(self, data: dict) -> str:
         """优化版签文生成（智能分段+混合布局）"""
@@ -416,12 +442,7 @@ class SensojiPlugin(Star):
             "message": self.remove_escaped_emojis(llm_response.completion_text)
         })
         # url = await self.html_render(TMPL, {"title": "解签结果", "message": self.remove_escaped_emojis(llm_response.completion_text.replace("\n", "<br>"))})
-        try:
-            yield event.image_result(image_url)
-        finally:
-            # 发送完成后立即删除
-            if os.path.exists(image_url):
-                os.remove(image_url)
+        yield event.image_result(image_url)
 
     @command("抽签帮助")
     async def help(self, event: AstrMessageEvent):
@@ -451,12 +472,7 @@ class SensojiPlugin(Star):
             "message": result,
         })
         # url = await self.html_render(TMPL, {"title": "抽签结果" ,"message": result.replace("\n", "<br>")})
-        try:
-            yield event.image_result(image_url)
-        finally:
-            # 发送完成后立即删除
-            if os.path.exists(image_url):
-                os.remove(image_url)
+        yield event.image_result(image_url)
 
     @command("转运")
     async def change_fortune(self, event: AstrMessageEvent):
@@ -472,12 +488,7 @@ class SensojiPlugin(Star):
                 "message": "当前管理员已禁用转运功能",
                 "footer": "如需使用请联系管理员"
             })
-            try:
-                yield event.image_result(image_url)
-            finally:
-                # 发送完成后立即删除
-                if os.path.exists(image_url):
-                    os.remove(image_url)
+            yield event.image_result(image_url)
             return
 
         user_id = event.get_sender_id()
@@ -503,12 +514,7 @@ class SensojiPlugin(Star):
                 "title": "转运失败",
                 "message": f"今日转运次数已达上限（{self.max_change_times}次）"
             })
-            try:
-                yield event.image_result(image_url)
-            finally:
-                # 发送完成后立即删除
-                if os.path.exists(image_url):
-                    os.remove(image_url)
+            yield event.image_result(image_url)
             return
 
         # 检查用户是否已有抽签结果；无则抽签，有则重新抽取转运签
@@ -530,12 +536,7 @@ class SensojiPlugin(Star):
             "message": result,
             "footer": f"今日已转运 {change_counts[user_id]['count']}/{self.max_change_times if self.max_change_times > 0 else '∞'} 次"
         })
-        try:
-            yield event.image_result(image_url)
-        finally:
-            # 发送完成后立即删除
-            if os.path.exists(image_url):
-                os.remove(image_url)
+        yield event.image_result(image_url)
 
     @command("解签")
     async def explain_fortune(self, event: AstrMessageEvent):
@@ -566,4 +567,3 @@ class SensojiPlugin(Star):
         )
         async for resp in self._llm_fortune_explanation(event, message):
             yield resp
-

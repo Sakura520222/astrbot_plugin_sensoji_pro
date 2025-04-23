@@ -10,5 +10,11 @@
         "type": "int",
         "default": 3,
         "hint": "设置用户每日可转运的最大次数，设为0则不限制次数"
+    },
+    "daily_cleanup": {
+        "description": "自动清理时间间隔（默认1天）",
+        "type": "int",
+        "default": 1,
+        "hint": "设置定时清理时间间隔"
     }
 }
