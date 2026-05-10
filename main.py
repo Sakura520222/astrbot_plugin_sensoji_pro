@@ -1,3 +1,4 @@
+import os
 import random
 import re
 import time
@@ -6,7 +7,7 @@ from pathlib import Path
 from PIL import ImageDraw, ImageFont
 from PIL.Image import new as ImageNew
 from astrbot.api.all import *
-from asyncio import create_task, sleep
+from asyncio import create_task, sleep, Lock
 from datetime import datetime, timedelta
 # 导入签文数据
 from data.plugins.astrbot_plugin_sensoji_pro.sensoji_data import sensoji_results
@@ -28,6 +29,8 @@ def save_data(data):
     """将用户抽签结果保存到 JSON 文件"""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 # 加载转运次数数据
@@ -53,6 +56,7 @@ class SensojiPlugin(Star):
         self.enable_change = self.config.get("enable_change_fortune", True)
         self.max_change_times = self.config.get("max_change_fortune_times", 3) if self.enable_change else 0
         self.daily_cleanup = self.config.get("daily_cleanup", 1)
+        self._data_lock = Lock()
         create_task(self.daily_cleanup_task())
 
     async def daily_cleanup_task(self):
@@ -401,6 +405,24 @@ class SensojiPlugin(Star):
 
         return user_daily_results[user_id]['result']
 
+    def _get_user_fortune_message(self, user_id: str, today: str) -> str:
+        """获取用户当天的签文内容，如果尚未抽签则返回提示信息。
+
+        与 explain_fortune / explain_fortune_tool 中原先的独立 load_data + 条件判断不同，
+        此方法在单次 load_data 调用中完成所有判断，避免了 TOCTOU 竞态条件。
+
+        Args:
+            user_id (str): 用户 ID.
+            today (str): 当前日期字符串，如 "2025-01-01".
+
+        Returns:
+            str: 用户当天的签文内容，或 "今日尚未抽签"。
+        """
+        user_daily_results = load_data()
+        if user_id in user_daily_results and user_daily_results[user_id].get('date') == today:
+            return user_daily_results[user_id]['result']
+        return "今日尚未抽签"
+
     async def _llm_fortune_explanation(self, event: AstrMessageEvent, message: str):
         """使用 LLM 对抽签进行解读"""
         # 定义解签提示模板
@@ -469,7 +491,8 @@ class SensojiPlugin(Star):
         """浅草寺抽签"""
         user_id = event.get_sender_id()
         today = str(date.today())
-        result = self.get_or_generate_result(user_id, today)
+        async with self._data_lock:
+            result = self.get_or_generate_result(user_id, today)
         image_url = await self.generate_fortune_image({
             "title": "抽签结果",
             "message": result,
@@ -481,11 +504,6 @@ class SensojiPlugin(Star):
     async def change_fortune(self, event: AstrMessageEvent):
         """浅草寺转运"""
         if not self.enable_change:
-            # url = await self.html_render(TMPL, {
-            #     "title": "功能不可用",
-            #     "message": "当前管理员已禁用转运功能",
-            #     "footer": "如需使用请联系管理员"
-            # })
             image_url = await self.generate_fortune_image({
                 "title": "功能不可用",
                 "message": "当前管理员已禁用转运功能",
@@ -496,23 +514,34 @@ class SensojiPlugin(Star):
 
         user_id = event.get_sender_id()
         today = str(date.today())
-        user_daily_results = load_data()
-        change_counts = load_change_counts()
 
-        # 初始化用户转运次数记录
-        if user_id not in change_counts:
-            change_counts[user_id] = {"date": today, "count": 0}
+        async with self._data_lock:
+            user_daily_results = load_data()
+            change_counts = load_change_counts()
 
-        # 检查是否是新的一天
-        if change_counts[user_id]["date"] != today:
-            change_counts[user_id] = {"date": today, "count": 0}
+            # 初始化用户转运次数记录
+            if user_id not in change_counts:
+                change_counts[user_id] = {"date": today, "count": 0}
 
-        # 检查转运次数限制
-        if self.max_change_times > 0 and change_counts[user_id]["count"] >= self.max_change_times:
-            # url = await self.html_render(TMPL, {
-            #     "title": "转运失败",
-            #     "message": f"今日转运次数已达上限（{self.max_change_times}次）"
-            # })
+            # 检查是否是新的一天
+            if change_counts[user_id]["date"] != today:
+                change_counts[user_id] = {"date": today, "count": 0}
+
+            # 检查转运次数限制
+            if self.max_change_times > 0 and change_counts[user_id]["count"] >= self.max_change_times:
+                need_abort = True
+            else:
+                need_abort = False
+                # 检查用户是否已有抽签结果；无则抽签，有则重新抽取转运签
+                is_change_fortune = user_id in user_daily_results and user_daily_results[user_id]['date'] == today
+                result = self.get_or_generate_result(user_id, today, is_change_fortune)
+
+                # 增加转运次数计数
+                if is_change_fortune:
+                    change_counts[user_id]["count"] += 1
+                    save_change_counts(change_counts)
+
+        if need_abort:
             image_url = await self.generate_fortune_image({
                 "title": "转运失败",
                 "message": f"今日转运次数已达上限（{self.max_change_times}次）"
@@ -520,20 +549,6 @@ class SensojiPlugin(Star):
             yield event.image_result(image_url)
             return
 
-        # 检查用户是否已有抽签结果；无则抽签，有则重新抽取转运签
-        is_change_fortune = user_id in user_daily_results and user_daily_results[user_id]['date'] == today
-        result = self.get_or_generate_result(user_id, today, is_change_fortune)
-
-        # 增加转运次数计数
-        if is_change_fortune:
-            change_counts[user_id]["count"] += 1
-            save_change_counts(change_counts)
-
-        # url = await self.html_render(TMPL, {
-        #     "title": "转运结果",
-        #     "message": result.replace("\n", "<br>"),
-        #     "footer": f"今日已转运 {change_counts[user_id]['count']}/{self.max_change_times if self.max_change_times > 0 else '∞'} 次"
-        # })
         image_url = await self.generate_fortune_image({
             "title": "转运结果",
             "message": result,
@@ -546,13 +561,9 @@ class SensojiPlugin(Star):
         """LLM 解签"""
         user_id = event.get_sender_id()
         today = str(date.today())
-        user_daily_results = load_data()
 
-        message = (
-            self.get_or_generate_result(user_id, today)
-            if user_id in user_daily_results and user_daily_results[user_id]['date'] == today
-            else "今日尚未抽签"
-        )
+        async with self._data_lock:
+            message = self._get_user_fortune_message(user_id, today)
         async for resp in self._llm_fortune_explanation(event, message):
             yield resp
 
@@ -561,12 +572,8 @@ class SensojiPlugin(Star):
         """Explain the result of a fortune from Sensoji Temple.应当在`解签``解释一下抽的签`时被调用。"""
         user_id = event.get_sender_id()
         today = str(date.today())
-        user_daily_results = load_data()
 
-        message = (
-            self.get_or_generate_result(user_id, today)
-            if user_id in user_daily_results and user_daily_results[user_id]['date'] == today
-            else "今日尚未抽签"
-        )
+        async with self._data_lock:
+            message = self._get_user_fortune_message(user_id, today)
         async for resp in self._llm_fortune_explanation(event, message):
             yield resp
