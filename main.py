@@ -355,6 +355,36 @@ class SensojiPlugin(Star):
         escaped_pattern = re.compile(r"&&\w+&&")
         return escaped_pattern.sub("", text)
 
+    def _get_user_key(self, event: AstrMessageEvent) -> str:
+        """获取用户唯一标识（复合键：unified_msg_origin + sender_id）
+
+        使用复合键避免跨平台桥接或特殊用户场景下 sender_id
+        格式不一致导致的状态丢失问题。
+        """
+        sender_id = event.get_sender_id()
+        unified_msg_origin = getattr(event, 'unified_msg_origin', '')
+        return f"{unified_msg_origin}:{sender_id}"
+
+    def _migrate_legacy_key(self, user_daily_results: dict, user_key: str, today: str) -> None:
+        """尝试将旧格式的键（纯 sender_id）迁移到复合键格式。
+
+        如果用户数据以旧键格式（纯 sender_id）存在且日期匹配当天，
+        将其迁移到新的复合键，保证已抽签用户平滑过渡。
+        """
+        if ':' not in user_key:
+            return
+        sender_id = user_key.split(':', 1)[1]
+
+        # 复合键已存在，无需迁移
+        if user_key in user_daily_results:
+            return
+
+        # 旧键存在且日期匹配当天，迁移到新键
+        if sender_id in user_daily_results and user_daily_results[sender_id].get('date') == today:
+            user_daily_results[user_key] = user_daily_results.pop(sender_id)
+            save_data(user_daily_results)
+            logger.debug(f"已将旧键 {sender_id} 迁移为复合键 {user_key}")
+
     def get_fortune_message(self, selected_result):
         """构建签文结果信息
 
@@ -372,26 +402,29 @@ class SensojiPlugin(Star):
             f"运势细节：{selected_result['horoscope_details']}"
         )
 
-    def get_or_generate_result(self, user_id, today, is_change_fortune=False, result_data=sensoji_results):
+    def get_or_generate_result(self, user_id, today, is_change_fortune=False, result_data=sensoji_results, user_daily_results=None):
         """获取用户的抽签结果或生成新的签文
 
         Args:
-            user_id (str): 用户 ID.
+            user_id (str): 用户唯一标识（复合键或纯 sender_id）.
             today (str): 当前日期.
             result_data (list): 用于生成签文的列表数据.
             is_change_fortune (bool): 是否生成转运签.
+            user_daily_results (dict | None): 已加载的数据，为 None 时从磁盘读取。
 
         Returns:
-            str: 返回当前用户的抽签或转运结果.
+            tuple: (结果消息, 更新后的 user_daily_results 字典).
         """
+        if user_daily_results is None:
+            user_daily_results = load_data()
 
-        user_daily_results = load_data()
+        # 尝试迁移旧键数据
+        self._migrate_legacy_key(user_daily_results, user_id, today)
 
         # 检查用户是否已有当天结果
         if user_id in user_daily_results:
             if user_daily_results[user_id]['date'] != today:  # 如果日期过期，清除旧记录
                 del user_daily_results[user_id]
-                save_data(user_daily_results)
 
         # 如果用户没有当天的结果，或生成的签为转运签
         if user_id not in user_daily_results or is_change_fortune:
@@ -401,24 +434,26 @@ class SensojiPlugin(Star):
                 'date': today,
                 'result': result_message
             }
-            save_data(user_daily_results)  # 保存结果
 
-        return user_daily_results[user_id]['result']
+        return user_daily_results[user_id]['result'], user_daily_results
 
-    def _get_user_fortune_message(self, user_id: str, today: str) -> str:
+    def _get_user_fortune_message(self, user_id: str, today: str, user_daily_results: dict = None) -> str:
         """获取用户当天的签文内容，如果尚未抽签则返回提示信息。
 
-        与 explain_fortune / explain_fortune_tool 中原先的独立 load_data + 条件判断不同，
-        此方法在单次 load_data 调用中完成所有判断，避免了 TOCTOU 竞态条件。
-
         Args:
-            user_id (str): 用户 ID.
+            user_id (str): 用户唯一标识（复合键或纯 sender_id）.
             today (str): 当前日期字符串，如 "2025-01-01".
+            user_daily_results (dict | None): 已加载的数据，为 None 时从磁盘读取。
 
         Returns:
             str: 用户当天的签文内容，或 "今日尚未抽签"。
         """
-        user_daily_results = load_data()
+        if user_daily_results is None:
+            user_daily_results = load_data()
+
+        # 尝试迁移旧键数据
+        self._migrate_legacy_key(user_daily_results, user_id, today)
+
         if user_id in user_daily_results and user_daily_results[user_id].get('date') == today:
             return user_daily_results[user_id]['result']
         return "今日尚未抽签"
@@ -489,15 +524,16 @@ class SensojiPlugin(Star):
     @command("抽签")
     async def select_fortune(self, event: AstrMessageEvent):
         """浅草寺抽签"""
-        user_id = event.get_sender_id()
+        user_id = self._get_user_key(event)
         today = str(date.today())
         async with self._data_lock:
-            result = self.get_or_generate_result(user_id, today)
+            user_daily_results = load_data()
+            result, user_daily_results = self.get_or_generate_result(user_id, today, user_daily_results=user_daily_results)
+            save_data(user_daily_results)
         image_url = await self.generate_fortune_image({
             "title": "抽签结果",
             "message": result,
         })
-        # url = await self.html_render(TMPL, {"title": "抽签结果" ,"message": result.replace("\n", "<br>")})
         yield event.image_result(image_url)
 
     @command("转运")
@@ -512,7 +548,7 @@ class SensojiPlugin(Star):
             yield event.image_result(image_url)
             return
 
-        user_id = event.get_sender_id()
+        user_id = self._get_user_key(event)
         today = str(date.today())
 
         async with self._data_lock:
@@ -534,7 +570,8 @@ class SensojiPlugin(Star):
                 need_abort = False
                 # 检查用户是否已有抽签结果；无则抽签，有则重新抽取转运签
                 is_change_fortune = user_id in user_daily_results and user_daily_results[user_id]['date'] == today
-                result = self.get_or_generate_result(user_id, today, is_change_fortune)
+                result, user_daily_results = self.get_or_generate_result(user_id, today, is_change_fortune, user_daily_results=user_daily_results)
+                save_data(user_daily_results)
 
                 # 增加转运次数计数
                 if is_change_fortune:
@@ -559,21 +596,23 @@ class SensojiPlugin(Star):
     @command("解签")
     async def explain_fortune(self, event: AstrMessageEvent):
         """LLM 解签"""
-        user_id = event.get_sender_id()
+        user_id = self._get_user_key(event)
         today = str(date.today())
 
         async with self._data_lock:
-            message = self._get_user_fortune_message(user_id, today)
+            user_daily_results = load_data()
+            message = self._get_user_fortune_message(user_id, today, user_daily_results)
         async for resp in self._llm_fortune_explanation(event, message):
             yield resp
 
     @llm_tool("explain_fortune")
     async def explain_fortune_tool(self, event: AstrMessageEvent):
         """Explain the result of a fortune from Sensoji Temple.应当在`解签``解释一下抽的签`时被调用。"""
-        user_id = event.get_sender_id()
+        user_id = self._get_user_key(event)
         today = str(date.today())
 
         async with self._data_lock:
-            message = self._get_user_fortune_message(user_id, today)
+            user_daily_results = load_data()
+            message = self._get_user_fortune_message(user_id, today, user_daily_results)
         async for resp in self._llm_fortune_explanation(event, message):
             yield resp
